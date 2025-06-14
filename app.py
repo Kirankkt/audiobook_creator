@@ -3,85 +3,87 @@ from TTS.api import TTS
 import numpy as np
 import soundfile as sf
 from io import BytesIO
+import pdfplumber
+import docx
 
 # --- Helpers ---
 def chunk_text(text, max_len=2000):
     """
-    Naively split text into chunks of up to max_len characters.
+    Split text into chunks not exceeding max_len characters, breaking at spaces.
     """
     chunks = []
     start = 0
-    while start < len(text):
-        end = min(start + max_len, len(text))
-        # try to split at the last space before end
-        if end < len(text) and ' ' in text[start:end]:
-            end = text.rfind(' ', start, end)
+    length = len(text)
+    while start < length:
+        end = min(start + max_len, length)
+        if end < length:
+            split = text.rfind(" ", start, end)
+            if split > start:
+                end = split
         chunks.append(text[start:end].strip())
         start = end
     return chunks
 
 # --- Streamlit UI ---
-st.title("📚 Open-Source Audiobook Generator")
-st.write(
-    "Upload a text file and convert it into an audiobook using Coqui TTS (free, open-source)."
-)
+st.title("📚️ Open-Source Book-to-Audiobook")
 
-# File uploader
-uploaded_file = st.file_uploader("Upload your book (.txt)", type=["txt"])
-
-# Model selection
-tts_model = st.selectbox(
-    "Select a TTS model:",
-    [
-        "tts_models/en/vctk/vits",
-        "tts_models/en/ljspeech/tacotron2-DDC"
-    ]
-)
-
-if st.button("Generate Audiobook"):
-    if not uploaded_file:
-        st.error("Please upload a .txt file first.")
+uploaded = st.file_uploader("Upload a .txt, .pdf, or .docx file", type=["txt", "pdf", "docx"])
+if uploaded:
+    # Read text based on file type
+    if uploaded.type == "application/pdf":
+        try:
+            with pdfplumber.open(uploaded) as pdf:
+                text = "\n\n".join(page.extract_text() or "" for page in pdf.pages)
+        except Exception as e:
+            st.error(f"Failed to parse PDF: {e}")
+            st.stop()
+    elif uploaded.type in ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/msword"]:
+        try:
+            doc = docx.Document(uploaded)
+            text = "\n\n".join(p.text for p in doc.paragraphs)
+        except Exception as e:
+            st.error(f"Failed to parse Word document: {e}")
+            st.stop()
     else:
-        text = uploaded_file.read().decode("utf-8")
-        st.info("Splitting text into chunks...")
+        text = uploaded.read().decode("utf-8")
+
+    if not text.strip():
+        st.warning("No text found in the uploaded file.")
+        st.stop()
+
+    # Model selection
+    models = TTS.list_models()
+    default = "tts_models/en/ljspeech/tacotron2-DDC"
+    model_name = st.selectbox("Choose a TTS model", models, index=models.index(default) if default in models else 0)
+    tts = TTS(model_name)
+
+    # Synthesize
+    if st.button("Generate Audiobook 🏃‍♂️"):
         chunks = chunk_text(text)
-        st.write(f"Generated {len(chunks)} chunks.")
-
-        # Initialize TTS
-        tts = TTS(tts_model)
-
-        # Generate audio per chunk
-        all_audio = []
-        sr = None
-        progress_bar = st.progress(0)
+        audio_segments = []
+        progress = st.progress(0)
         for i, chunk in enumerate(chunks):
-            wav, sr = tts.tts(chunk)
-            all_audio.append(wav)
-            progress_bar.progress((i + 1) / len(chunks))
-
-        # Concatenate and write to WAV
-        st.info("Concatenating audio and preparing download...")
-        combined = np.concatenate(all_audio)
+            wav = tts.tts(chunk)
+            audio_segments.append(wav)
+            progress.progress((i + 1) / len(chunks))
+        # Concatenate
+        combined = np.concatenate(audio_segments)
+        # Export to WAV in-memory
         buf = BytesIO()
-        sf.write(buf, combined, sr, format="WAV")
+        sf.write(buf, combined, samplerate=tts.sampling_rate, format="WAV")
         buf.seek(0)
-
-        # Download button
+        st.audio(buf, format="audio/wav")
         st.download_button(
-            label="📥 Download Audiobook",
+            "Download Audiobook",
             data=buf,
             file_name="audiobook.wav",
             mime="audio/wav"
         )
 
-st.markdown("---")
-st.write("""
-**Requirements:**
-- `pip install TTS soundfile streamlit`
-
-**Instructions:**
-1. Run `streamlit run streamlit_tts_app.py`.
-2. Upload any `.txt` file.
-3. Select the desired open-source TTS model.
-4. Click **Generate Audiobook** and download your `.wav` file.
-""
+# --- requirements.txt ---
+# streamlit>=1.24.0
+# TTS>=0.14.0
+# numpy
+# soundfile
+# pdfplumber
+# python-docx
